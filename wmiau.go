@@ -184,7 +184,21 @@ func sendEventWithWebHook(mycli *MyClient, postmap map[string]interface{}, path 
 	// Get global webhook if configured
 	go sendToGlobalWebHook(jsonData, mycli.token, mycli.userID)
 
-	go sendToGlobalRabbit(jsonData)
+	// Prepare data for RabbitMQ with additional fields
+	rabbitData := make(map[string]interface{})
+	for k, v := range postmap {
+		rabbitData[k] = v
+	}
+	rabbitData["_userToken"] = mycli.token
+	rabbitData["_userId"] = mycli.userID
+
+	rabbitJsonData, err := json.Marshal(rabbitData)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to marshal rabbit data to JSON")
+		return
+	}
+
+	go sendToGlobalRabbit(rabbitJsonData)
 }
 
 func checkIfSubscribedToEvent(subscribedEvents []string, eventType string, userId string) bool {
@@ -456,6 +470,7 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 					postmap := make(map[string]interface{})
 					postmap["event"] = evt.Event
 					postmap["qrCodeBase64"] = base64qrcode
+					postmap["qrCodePlain"] = evt.Code
 					postmap["type"] = "QR"
 
 					sendEventWithWebHook(&mycli, postmap, "")
