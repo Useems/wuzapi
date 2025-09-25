@@ -2649,6 +2649,47 @@ func (s *server) GetContacts() http.HandlerFunc {
 	}
 }
 
+// Gets specific contact
+func (s *server) GetContact() http.HandlerFunc {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		txtid := r.Context().Value("userinfo").(Values).Get("Id")
+
+		if clientManager.GetWhatsmeowClient(txtid) == nil {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("no session"))
+			return
+		}
+
+		jidParam := r.URL.Query().Get("jid")
+		if jidParam == "" {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("missing jid parameter"))
+			return
+		}
+
+		jid, ok := parseJID(jidParam)
+		if !ok {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("could not parse jid"))
+			return
+		}
+
+		contact, err := clientManager.GetWhatsmeowClient(txtid).Store.Contacts.GetContact(jid)
+		if err != nil {
+			s.Respond(w, r, http.StatusInternalServerError, err)
+			return
+		}
+
+		responseJson, err := json.Marshal(contact)
+		if err != nil {
+			s.Respond(w, r, http.StatusInternalServerError, err)
+		} else {
+			s.Respond(w, r, http.StatusOK, string(responseJson))
+		}
+
+		return
+	}
+}
+
 // Sets Chat Presence (typing/paused/recording audio)
 func (s *server) ChatPresence() http.HandlerFunc {
 
