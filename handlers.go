@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"image"
 	"image/jpeg"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gopxl/beep/v2/mp3"
+	"github.com/gopxl/beep/v2/vorbis"
 	"github.com/gorilla/mux"
 	"github.com/nfnt/resize"
 	"github.com/patrickmn/go-cache"
@@ -823,6 +826,101 @@ func (s *server) SendDocument() http.HandlerFunc {
 	}
 }
 
+// generateWaveformAndDuration generates waveform and calculates audio file duration
+func generateWaveformAndDuration(filePath string) ([]byte, uint32, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.Close()
+
+	// Determine file format and decode appropriately
+	var streamer beep.Streamer
+	var format beep.Format
+
+	// Reset file to beginning
+	f.Seek(0, 0)
+	
+	// Try to decode as OGG first (WhatsApp default format)
+	streamer, format, err = vorbis.Decode(f)
+	if err != nil {
+		// If it fails, try as MP3
+		f.Seek(0, 0)
+		streamer, format, err = mp3.Decode(f)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to decode audio file: %v", err)
+		}
+	}
+	defer streamer.Close()
+
+	const numSamples = 64
+	samples := make([]float64, 0)
+	buf := make([][2]float64, 1024)
+	totalSamples := 0
+
+	// Converting stereo to mono and counting samples
+	for {
+		n, ok := streamer.Stream(buf)
+		if !ok {
+			break
+		}
+		totalSamples += n
+		for i := 0; i < n; i++ {
+			// Average left and right channels for mono
+			sample := (buf[i][0] + buf[i][1]) / 2
+			samples = append(samples, sample)
+		}
+	}
+
+	// Calculate duration in seconds
+	duration := uint32(float64(totalSamples) / format.SampleRate.N(format.SampleRate.D()))
+
+	if len(samples) == 0 {
+		return make([]byte, numSamples), duration, nil
+	}
+
+	// Split samples into blocks to generate 64 values
+	blockSize := len(samples) / numSamples
+	if blockSize < 1 {
+		blockSize = 1
+	}
+	
+	filteredData := make([]float64, numSamples)
+	var maxAmplitude float64 = 0
+
+	for i := 0; i < numSamples; i++ {
+		start := i * blockSize
+		end := start + blockSize
+		if end > len(samples) {
+			end = len(samples)
+		}
+
+		// Calculate average amplitude in the block
+		var sum float64
+		for j := start; j < end; j++ {
+			sum += math.Abs(samples[j])
+		}
+		avg := sum / float64(end-start)
+
+		filteredData[i] = avg
+		if avg > maxAmplitude {
+			maxAmplitude = avg
+		}
+	}
+
+	// Normalize data based on maximum value
+	normalizedData := make([]byte, numSamples)
+	for i := 0; i < numSamples; i++ {
+		if maxAmplitude != 0 {
+			normalizedData[i] = byte((filteredData[i] / maxAmplitude) * 100)
+		} else {
+			normalizedData[i] = 0
+		}
+	}
+
+	return normalizedData, duration, nil
+}
+
 // Sends an audio message
 func (s *server) SendAudio() http.HandlerFunc {
 
@@ -831,6 +929,7 @@ func (s *server) SendAudio() http.HandlerFunc {
 		Audio       string
 		Caption     string
 		Id          string
+		Seconds     *uint32 // Duration in seconds (optional)
 		ContextInfo waE2E.ContextInfo
 	}
 
@@ -878,6 +977,8 @@ func (s *server) SendAudio() http.HandlerFunc {
 
 		var uploaded whatsmeow.UploadResponse
 		var filedata []byte
+		var waveform []byte
+		var seconds uint32
 
 		if t.Audio[0:14] == "data:audio/ogg" {
 			var dataURL, err = dataurl.DecodeString(t.Audio)
@@ -886,6 +987,61 @@ func (s *server) SendAudio() http.HandlerFunc {
 				return
 			} else {
 				filedata = dataURL.Data
+
+				// Use provided duration or calculate automatically
+				if t.Seconds != nil && *t.Seconds > 0 {
+					seconds = *t.Seconds
+					log.Info().Uint32("seconds", seconds).Msg("using provided audio duration")
+				}
+
+				// Create temporary file to generate waveform and duration (if needed)
+				tempFile, err := os.CreateTemp("", "audio-*.ogg")
+				if err != nil {
+					log.Warn().Err(err).Msg("failed to create temp file for waveform generation")
+					// If can't create temp file but duration was provided, continue
+					if t.Seconds == nil {
+						s.Respond(w, r, http.StatusInternalServerError, errors.New("failed to process audio file"))
+						return
+					}
+				} else {
+					defer func() {
+						tempFile.Close()
+						os.Remove(tempFile.Name())
+					}()
+
+					// Write audio data to temporary file
+					if _, err := tempFile.Write(filedata); err == nil {
+						tempFile.Close()
+						
+						// Generate waveform and calculate duration if not provided
+						if wf, duration, err := generateWaveformAndDuration(tempFile.Name()); err == nil {
+							waveform = wf
+							
+							// If duration was not provided, use the calculated one
+							if t.Seconds == nil || *t.Seconds == 0 {
+								seconds = duration
+								log.Info().Uint32("calculated_seconds", seconds).Msg("calculated audio duration")
+							}
+							
+							log.Info().Int("waveform_length", len(waveform)).Uint32("duration", seconds).Msg("waveform and duration generated successfully")
+						} else {
+							log.Warn().Err(err).Msg("failed to generate waveform and duration")
+							// If it failed and no duration was provided, return error
+							if t.Seconds == nil {
+								s.Respond(w, r, http.StatusInternalServerError, errors.New("failed to process audio file duration"))
+								return
+							}
+						}
+					} else {
+						log.Warn().Err(err).Msg("failed to write audio data to temp file")
+						// If can't write but has provided duration, continue
+						if t.Seconds == nil {
+							s.Respond(w, r, http.StatusInternalServerError, errors.New("failed to process audio file"))
+							return
+						}
+					}
+				}
+
 				uploaded, err = clientManager.GetWhatsmeowClient(txtid).Upload(context.Background(), filedata, whatsmeow.MediaAudio)
 				if err != nil {
 					s.Respond(w, r, http.StatusInternalServerError, errors.New(fmt.Sprintf("failed to upload file: %v", err)))
@@ -901,29 +1057,30 @@ func (s *server) SendAudio() http.HandlerFunc {
 		mime := "audio/ogg; codecs=opus"
 
 		msg := &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
-			URL:        proto.String(uploaded.URL),
-			DirectPath: proto.String(uploaded.DirectPath),
-			MediaKey:   uploaded.MediaKey,
-			//Mimetype:      proto.String(http.DetectContentType(filedata)),
+			URL:           proto.String(uploaded.URL),
+			DirectPath:    proto.String(uploaded.DirectPath),
+			MediaKey:      uploaded.MediaKey,
 			Mimetype:      &mime,
 			FileEncSHA256: uploaded.FileEncSHA256,
 			FileSHA256:    uploaded.FileSHA256,
 			FileLength:    proto.Uint64(uint64(len(filedata))),
 			PTT:           &ptt,
+			Waveform:      waveform,
+			Seconds:       proto.Uint32(seconds),
 		}}
 
 		if t.ContextInfo.StanzaID != nil {
-			msg.ExtendedTextMessage.ContextInfo = &waE2E.ContextInfo{
+			msg.AudioMessage.ContextInfo = &waE2E.ContextInfo{
 				StanzaID:      proto.String(*t.ContextInfo.StanzaID),
 				Participant:   proto.String(*t.ContextInfo.Participant),
 				QuotedMessage: &waE2E.Message{Conversation: proto.String("")},
 			}
 		}
 		if t.ContextInfo.MentionedJID != nil {
-			if msg.ExtendedTextMessage.ContextInfo == nil {
-				msg.ExtendedTextMessage.ContextInfo = &waE2E.ContextInfo{}
+			if msg.AudioMessage.ContextInfo == nil {
+				msg.AudioMessage.ContextInfo = &waE2E.ContextInfo{}
 			}
-			msg.ExtendedTextMessage.ContextInfo.MentionedJID = t.ContextInfo.MentionedJID
+			msg.AudioMessage.ContextInfo.MentionedJID = t.ContextInfo.MentionedJID
 		}
 
 		resp, err = clientManager.GetWhatsmeowClient(txtid).SendMessage(context.Background(), recipient, msg, whatsmeow.SendRequestExtra{ID: msgid})
@@ -932,8 +1089,8 @@ func (s *server) SendAudio() http.HandlerFunc {
 			return
 		}
 
-		log.Info().Str("timestamp", fmt.Sprintf("%v", resp.Timestamp)).Str("id", msgid).Msg("Message sent")
-		response := map[string]interface{}{"Details": "Sent", "Timestamp": resp.Timestamp.Unix(), "Id": msgid}
+		log.Info().Str("timestamp", fmt.Sprintf("%v", resp.Timestamp)).Str("id", msgid).Uint32("duration", seconds).Msg("Message sent")
+		response := map[string]interface{}{"Details": "Sent", "Timestamp": resp.Timestamp.Unix(), "Id": msgid, "Duration": seconds}
 		responseJson, err := json.Marshal(response)
 		if err != nil {
 			s.Respond(w, r, http.StatusInternalServerError, err)
