@@ -826,16 +826,15 @@ func (s *server) SendDocument() http.HandlerFunc {
 	}
 }
 
-// generateWaveformAndDuration generates waveform and calculates audio file duration using go-ffprobe
+// generateWaveformAndDuration generates real waveform and calculates audio file duration using ffprobe
 func generateWaveformAndDuration(filePath string) ([]byte, uint32, error) {
-	ctx, cancelFn := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancelFn := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelFn()
 
 	// Probe the audio file
 	data, err := ffprobe.ProbeURL(ctx, filePath)
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to probe audio file with ffprobe")
-		// Return default waveform and 1 second duration if ffprobe fails
 		return generateDefaultWaveform(), 1, nil
 	}
 
@@ -851,10 +850,9 @@ func generateWaveformAndDuration(filePath string) ([]byte, uint32, error) {
 	durationSeconds := uint32(duration.Seconds())
 	
 	if durationSeconds == 0 {
-		durationSeconds = 1 // Minimum 1 second
+		durationSeconds = 1
 	}
 
-	// Log audio file information
 	log.Info().
 		Str("codec", audioStream.CodecName).
 		Str("sample_rate", audioStream.SampleRate).
@@ -862,87 +860,134 @@ func generateWaveformAndDuration(filePath string) ([]byte, uint32, error) {
 		Uint32("duration_seconds", durationSeconds).
 		Msg("audio file probed successfully")
 
-	// Generate realistic waveform based on duration and audio properties
-	waveform := generateRealisticWaveform(int(durationSeconds), audioStream)
+	// Generate real waveform using PCM data extraction
+	waveform, err := generateRealWaveformFromPCM(filePath, durationSeconds)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to generate real waveform, using default")
+		return generateDefaultWaveform(), durationSeconds, nil
+	}
 	
 	return waveform, durationSeconds, nil
 }
 
-// generateDefaultWaveform generates a simple default waveform
-func generateDefaultWaveform() []byte {
+// generateRealWaveformFromPCM extracts real amplitude data from audio file
+func generateRealWaveformFromPCM(filePath string, durationSeconds uint32) ([]byte, error) {
 	const numSamples = 64
-	waveform := make([]byte, numSamples)
 	
-	// Simple pattern: moderate values in the middle, lower at edges
-	for i := 0; i < numSamples; i++ {
-		// Create a bell-like curve
-		x := float64(i) / float64(numSamples-1)
-		amplitude := math.Sin(math.Pi*x)*60 + 20 // Values between 20-80
-		waveform[i] = byte(amplitude)
+	// Use ffmpeg to convert audio to raw PCM data
+	cmd := exec.Command("ffmpeg",
+		"-i", filePath,
+		"-f", "s16le",        // 16-bit signed little endian PCM
+		"-ac", "1",           // mono
+		"-ar", "8000",        // 8kHz sample rate (sufficient for waveform)
+		"-")
+	
+	var pcmData bytes.Buffer
+	cmd.Stdout = &pcmData
+	cmd.Stderr = nil // Ignore stderr to avoid verbose output
+	
+	err := cmd.Run()
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract PCM data: %v", err)
 	}
 	
-	return waveform
-}
-
-// generateRealisticWaveform generates a more realistic waveform based on duration and audio stream info
-func generateRealisticWaveform(durationSeconds int, audioStream *ffprobe.Stream) []byte {
-	const numSamples = 64
-	waveform := make([]byte, numSamples)
-	
-	rand.Seed(time.Now().UnixNano())
-	
-	// Base amplitude varies by codec and bitrate
-	baseAmplitude := 40
-	if audioStream != nil {
-		switch audioStream.CodecName {
-		case "opus":
-			baseAmplitude = 35 // Opus tends to be well-normalized
-		case "aac":
-			baseAmplitude = 45
-		case "mp3":
-			baseAmplitude = 50
-		default:
-			baseAmplitude = 40
-		}
-		
-		// Adjust based on bitrate if available
-		if bitRate, err := strconv.Atoi(audioStream.BitRate); err == nil && bitRate > 0 {
-			if bitRate < 64000 { // Low bitrate
-				baseAmplitude -= 10
-			} else if bitRate > 128000 { // High bitrate
-				baseAmplitude += 5
-			}
-		}
+	rawBytes := pcmData.Bytes()
+	if len(rawBytes) < 2 {
+		return generateDefaultWaveform(), nil
 	}
 	
-	// Create varied waveform pattern
+	// Convert bytes to 16-bit samples
+	numPCMSamples := len(rawBytes) / 2
+	pcmSamples := make([]int16, numPCMSamples)
+	
+	for i := 0; i < numPCMSamples; i++ {
+		pcmSamples[i] = int16(binary.LittleEndian.Uint16(rawBytes[i*2 : i*2+2]))
+	}
+	
+	// Calculate RMS amplitude for each waveform segment
+	waveform := make([]byte, numSamples)
+	samplesPerSegment := numPCMSamples / numSamples
+	
+	if samplesPerSegment == 0 {
+		samplesPerSegment = 1
+	}
+	
 	for i := 0; i < numSamples; i++ {
-		// Position-based variation
-		x := float64(i) / float64(numSamples-1)
+		start := i * samplesPerSegment
+		end := start + samplesPerSegment
 		
-		// Multiple sine waves for more natural look
-		wave1 := math.Sin(2*math.Pi*x*2) * 15      // Primary wave
-		wave2 := math.Sin(2*math.Pi*x*7) * 8       // High frequency details  
-		wave3 := math.Sin(2*math.Pi*x*0.5) * 20    // Low frequency envelope
-		
-		// Random variation
-		randomVar := (rand.Float64() - 0.5) * 15
-		
-		// Combine all variations
-		amplitude := float64(baseAmplitude) + wave1 + wave2 + wave3 + randomVar
-		
-		// Ensure values are within valid range
-		if amplitude < 5 {
-			amplitude = 5
+		if end > numPCMSamples {
+			end = numPCMSamples
 		}
+		
+		if start >= numPCMSamples {
+			waveform[i] = 0
+			continue
+		}
+		
+		// Calculate RMS for this segment
+		var sum float64 = 0
+		count := end - start
+		
+		for j := start; j < end; j++ {
+			sample := float64(pcmSamples[j])
+			sum += sample * sample
+		}
+		
+		rms := math.Sqrt(sum / float64(count))
+		
+		// Convert to 0-100 scale (16-bit PCM range is -32768 to 32767)
+		amplitude := int(rms * 100 / 32768)
+		
 		if amplitude > 100 {
 			amplitude = 100
 		}
+		if amplitude < 1 && rms > 0 {
+			amplitude = 1 // Ensure audible audio shows at least 1
+		}
 		
 		waveform[i] = byte(amplitude)
 	}
 	
-	return waveform
+	// Apply light smoothing to reduce noise while preserving peaks
+	applyLightSmoothing(waveform)
+	
+	log.Info().
+		Int("pcm_samples", numPCMSamples).
+		Int("samples_per_segment", samplesPerSegment).
+		Msg("real waveform generated from PCM data")
+	
+	return waveform, nil
+}
+
+// applyLightSmoothing applies minimal smoothing to preserve audio fidelity
+func applyLightSmoothing(waveform []byte) {
+	if len(waveform) < 3 {
+		return
+	}
+	
+	// Only smooth obvious outliers, preserve real peaks
+	for i := 1; i < len(waveform)-1; i++ {
+		prev := int(waveform[i-1])
+		curr := int(waveform[i])
+		next := int(waveform[i+1])
+		
+		// Only smooth if current value is significantly different from neighbors
+		avgNeighbors := (prev + next) / 2
+		diff := abs(curr - avgNeighbors)
+		
+		// Only smooth if difference is more than 20 and neighbors are similar
+		if diff > 20 && abs(prev-next) < 15 {
+			waveform[i] = byte((curr + avgNeighbors) / 2)
+		}
+	}
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // Sends an audio message
