@@ -10,7 +10,6 @@ import (
 	"image"
 	"image/jpeg"
 	"math"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
