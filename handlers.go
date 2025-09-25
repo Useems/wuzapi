@@ -852,7 +852,6 @@ func generateWaveformAndDuration(filePath string) ([]byte, uint32, error) {
 			return nil, 0, fmt.Errorf("failed to decode audio file: %v", err)
 		}
 	}
-	defer streamer.Close()
 
 	const numSamples = 64
 	samples := make([]float64, 0)
@@ -874,7 +873,7 @@ func generateWaveformAndDuration(filePath string) ([]byte, uint32, error) {
 	}
 
 	// Calculate duration in seconds
-	duration := uint32(float64(totalSamples) / format.SampleRate.N(format.SampleRate.D()))
+	duration := uint32(float64(totalSamples) / float64(format.SampleRate))
 
 	if len(samples) == 0 {
 		return make([]byte, numSamples), duration, nil
