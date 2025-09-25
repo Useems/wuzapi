@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gopxl/beep/v2"
 	"github.com/gopxl/beep/v2/mp3"
 	"github.com/gopxl/beep/v2/vorbis"
 	"github.com/gorilla/mux"
