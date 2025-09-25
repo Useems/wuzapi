@@ -845,12 +845,17 @@ func generateWaveformAndDuration(filePath string) ([]byte, uint32, error) {
 	// Try to decode as OGG first (WhatsApp default format)
 	streamer, format, err = vorbis.Decode(f)
 	if err != nil {
+		log.Warn().Err(err).Msg("failed to decode as OGG/Vorbis")
 		// If it fails, try as MP3
 		f.Seek(0, 0)
 		streamer, format, err = mp3.Decode(f)
 		if err != nil {
-			return nil, 0, fmt.Errorf("failed to decode audio file: %v", err)
+			log.Warn().Err(err).Msg("failed to decode as MP3")
+			return nil, 0, fmt.Errorf("failed to decode audio file as OGG or MP3: %v", err)
 		}
+		log.Info().Msg("successfully decoded as MP3")
+	} else {
+		log.Info().Msg("successfully decoded as OGG")
 	}
 
 	const numSamples = 64
@@ -994,50 +999,63 @@ func (s *server) SendAudio() http.HandlerFunc {
 					log.Info().Uint32("seconds", seconds).Msg("using provided audio duration")
 				}
 
-				// Create temporary file to generate waveform and duration (if needed)
-				tempFile, err := os.CreateTemp("", "audio-*.ogg")
-				if err != nil {
-					log.Warn().Err(err).Msg("failed to create temp file for waveform generation")
-					// If can't create temp file but duration was provided, continue
-					if t.Seconds == nil {
+				// Only try to generate waveform and duration if we need to
+				shouldProcessFile := (t.Seconds == nil || *t.Seconds == 0)
+				
+				if shouldProcessFile {
+					// Create temporary file to generate waveform and duration
+					tempFile, err := os.CreateTemp("", "audio-*.ogg")
+					if err != nil {
+						log.Warn().Err(err).Msg("failed to create temp file for waveform generation")
+						// If no duration provided and can't process file, return error
 						s.Respond(w, r, http.StatusInternalServerError, errors.New("failed to process audio file"))
 						return
-					}
-				} else {
-					defer func() {
-						tempFile.Close()
-						os.Remove(tempFile.Name())
-					}()
+					} else {
+						defer func() {
+							tempFile.Close()
+							os.Remove(tempFile.Name())
+						}()
 
-					// Write audio data to temporary file
-					if _, err := tempFile.Write(filedata); err == nil {
-						tempFile.Close()
-						
-						// Generate waveform and calculate duration if not provided
-						if wf, duration, err := generateWaveformAndDuration(tempFile.Name()); err == nil {
-							waveform = wf
+						// Write audio data to temporary file
+						if _, err := tempFile.Write(filedata); err == nil {
+							tempFile.Close()
 							
-							// If duration was not provided, use the calculated one
-							if t.Seconds == nil || *t.Seconds == 0 {
+							// Generate waveform and calculate duration
+							if wf, duration, err := generateWaveformAndDuration(tempFile.Name()); err == nil {
+								waveform = wf
 								seconds = duration
 								log.Info().Uint32("calculated_seconds", seconds).Msg("calculated audio duration")
+								log.Info().Int("waveform_length", len(waveform)).Uint32("duration", seconds).Msg("waveform and duration generated successfully")
+							} else {
+								log.Warn().Err(err).Msg("failed to generate waveform and duration")
+								// Set default duration if calculation fails
+								seconds = 1
+								log.Info().Msg("using default duration of 1 second")
 							}
-							
-							log.Info().Int("waveform_length", len(waveform)).Uint32("duration", seconds).Msg("waveform and duration generated successfully")
 						} else {
-							log.Warn().Err(err).Msg("failed to generate waveform and duration")
-							// If it failed and no duration was provided, return error
-							if t.Seconds == nil {
-								s.Respond(w, r, http.StatusInternalServerError, errors.New("failed to process audio file duration"))
-								return
-							}
+							log.Warn().Err(err).Msg("failed to write audio data to temp file")
+							// Set default duration
+							seconds = 1
 						}
-					} else {
-						log.Warn().Err(err).Msg("failed to write audio data to temp file")
-						// If can't write but has provided duration, continue
-						if t.Seconds == nil {
-							s.Respond(w, r, http.StatusInternalServerError, errors.New("failed to process audio file"))
-							return
+					}
+				} else {
+					// Duration provided, try to generate just waveform (optional)
+					tempFile, err := os.CreateTemp("", "audio-*.ogg")
+					if err == nil {
+						defer func() {
+							tempFile.Close()
+							os.Remove(tempFile.Name())
+						}()
+
+						if _, err := tempFile.Write(filedata); err == nil {
+							tempFile.Close()
+							if wf, _, err := generateWaveformAndDuration(tempFile.Name()); err == nil {
+								waveform = wf
+								log.Info().Int("waveform_length", len(waveform)).Msg("waveform generated successfully")
+							} else {
+								log.Warn().Err(err).Msg("failed to generate waveform, continuing without it")
+								// Continue without waveform
+							}
 						}
 					}
 				}
