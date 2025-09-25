@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"encoding/binary"
+	"os/exec"
 
 	"github.com/gorilla/mux"
 	"github.com/nfnt/resize"
@@ -868,6 +870,22 @@ func generateWaveformAndDuration(filePath string) ([]byte, uint32, error) {
 	}
 	
 	return waveform, durationSeconds, nil
+}
+
+// generateDefaultWaveform generates a simple default waveform
+func generateDefaultWaveform() []byte {
+	const numSamples = 64
+	waveform := make([]byte, numSamples)
+	
+	// Simple pattern: moderate values in the middle, lower at edges
+	for i := 0; i < numSamples; i++ {
+		// Create a bell-like curve
+		x := float64(i) / float64(numSamples-1)
+		amplitude := math.Sin(math.Pi*x)*60 + 20 // Values between 20-80
+		waveform[i] = byte(amplitude)
+	}
+	
+	return waveform
 }
 
 // generateRealWaveformFromPCM extracts real amplitude data from audio file
