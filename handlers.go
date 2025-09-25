@@ -2673,7 +2673,7 @@ func (s *server) GetContact() http.HandlerFunc {
 			return
 		}
 
-		contact, err := clientManager.GetWhatsmeowClient(txtid).Store.Contacts.GetContact(jid)
+		contact, err := clientManager.GetWhatsmeowClient(txtid).Store.Contacts.GetContact(context.Background(), jid)
 		if err != nil {
 			s.Respond(w, r, http.StatusInternalServerError, err)
 			return
