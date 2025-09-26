@@ -921,8 +921,9 @@ func generateRealWaveformFromPCM(filePath string, durationSeconds uint32) ([]byt
 		pcmSamples[i] = int16(binary.LittleEndian.Uint16(rawBytes[i*2 : i*2+2]))
 	}
 	
-	// Calculate RMS amplitude for each waveform segment
-	waveform := make([]byte, numSamples)
+	// First pass: Calculate all RMS values to find the maximum for normalization
+	rmsValues := make([]float64, numSamples)
+	var maxRms float64 = 0
 	samplesPerSegment := numPCMSamples / numSamples
 	
 	if samplesPerSegment == 0 {
@@ -938,7 +939,7 @@ func generateRealWaveformFromPCM(filePath string, durationSeconds uint32) ([]byt
 		}
 		
 		if start >= numPCMSamples {
-			waveform[i] = 0
+			rmsValues[i] = 0
 			continue
 		}
 		
@@ -952,15 +953,41 @@ func generateRealWaveformFromPCM(filePath string, durationSeconds uint32) ([]byt
 		}
 		
 		rms := math.Sqrt(sum / float64(count))
+		rmsValues[i] = rms
 		
-		// Convert to 0-100 scale (16-bit PCM range is -32768 to 32767)
-		amplitude := int(rms * 100 / 32768)
+		if rms > maxRms {
+			maxRms = rms
+		}
+	}
+	
+	// Second pass: Normalize and scale amplitudes
+	waveform := make([]byte, numSamples)
+	
+	for i := 0; i < numSamples; i++ {
+		var amplitude int
+		
+		if maxRms > 0 {
+			// Dynamic normalization with amplification
+			// Scale to use more of the 0-100 range
+			normalizedRms := rmsValues[i] / maxRms
+			
+			// Apply amplification curve - makes quiet parts more visible
+			// while preserving relative differences
+			amplifiedRms := math.Pow(normalizedRms, 0.6) // Power curve for better visibility
+			
+			// Scale to 0-100 with minimum boost
+			amplitude = int(amplifiedRms * 90) // Use 90 instead of 100 to avoid clipping
+			
+			// Boost quiet but audible segments
+			if amplitude < 3 && rmsValues[i] > 0 {
+				amplitude = 3
+			}
+		} else {
+			amplitude = 0
+		}
 		
 		if amplitude > 100 {
 			amplitude = 100
-		}
-		if amplitude < 1 && rms > 0 {
-			amplitude = 1 // Ensure audible audio shows at least 1
 		}
 		
 		waveform[i] = byte(amplitude)
@@ -972,7 +999,8 @@ func generateRealWaveformFromPCM(filePath string, durationSeconds uint32) ([]byt
 	log.Info().
 		Int("pcm_samples", numPCMSamples).
 		Int("samples_per_segment", samplesPerSegment).
-		Msg("real waveform generated from PCM data")
+		Float64("max_rms", maxRms).
+		Msg("real waveform generated from PCM data with dynamic normalization")
 	
 	return waveform, nil
 }
