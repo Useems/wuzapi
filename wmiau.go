@@ -491,6 +491,11 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 					clientManager.DeleteWhatsmeowClient(userID)
 					clientManager.DeleteMyClient(userID)
 					clientManager.DeleteHTTPClient(userID)
+					postmap := make(map[string]interface{})
+					postmap["event"] = evt.Event
+					postmap["type"] = "QRTimeout"
+					sendEventWithWebHook(&mycli, postmap, "")
+					
 					killchannel[userID] <- true
 				} else if evt.Event == "success" {
 					log.Info().Msg("QR pairing ok!")
