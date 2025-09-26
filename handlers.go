@@ -223,6 +223,17 @@ func (s *server) Disconnect() http.HandlerFunc {
 		if clientManager.GetWhatsmeowClient(txtid).IsConnected() == true {
 			//if clientManager.GetWhatsmeowClient(txtid).IsLoggedIn() == true {
 			log.Info().Str("jid", jid).Msg("Disconnection successfull")
+			
+			// ✅ ADICIONAR: Enviar webhook antes da desconexão
+			mycli := clientManager.GetMyClient(txtid)
+			if mycli != nil {
+				postmap := make(map[string]interface{})
+				postmap["type"] = "Disconnect"
+				postmap["reason"] = "User requested disconnect"
+				sendEventWithWebHook(mycli, postmap, "")
+				log.Info().Str("txtid", txtid).Msg("Webhook sent for manual disconnect")
+			}
+			
 			_, err := s.db.Exec("UPDATE users SET connected=0,events=$1 WHERE id=$2", "", txtid)
 			if err != nil {
 				log.Warn().Str("txtid", txtid).Msg("Could not set events in users table")
