@@ -228,7 +228,7 @@ func (s *server) Disconnect() http.HandlerFunc {
 			mycli := clientManager.GetMyClient(txtid)
 			if mycli != nil {
 				postmap := make(map[string]interface{})
-				postmap["type"] = "Disconnect"
+				postmap["type"] = "Disconnected"
 				postmap["reason"] = "User requested disconnect"
 				sendEventWithWebHook(mycli, postmap, "")
 				log.Info().Str("txtid", txtid).Msg("Webhook sent for manual disconnect")
