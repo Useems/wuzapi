@@ -617,6 +617,11 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		log.Info().Msg("Received StreamReplaced event")
 		return
 	case *events.Message:
+		// Ignore status messages
+		if evt.Info.Chat.String() == "status@broadcast" {
+			log.Debug().Str("chat", evt.Info.Chat.String()).Msg("Ignoring status message")
+			return
+		}
 
 		var s3Config struct {
 			Enabled       string `db:"s3_enabled"`
