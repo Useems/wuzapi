@@ -3524,7 +3524,7 @@ func (s *server) ListGroups() http.HandlerFunc {
 			return
 		}
 
-		resp, err := clientManager.GetWhatsmeowClient(txtid).GetJoinedGroups()
+		resp, err := clientManager.GetWhatsmeowClient(txtid).GetJoinedGroups(r.Context())
 
 		if err != nil {
 			msg := fmt.Sprintf("failed to get group list: %v", err)
