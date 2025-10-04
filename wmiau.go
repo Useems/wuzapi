@@ -623,7 +623,11 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			return
 		}
 
-		log.Info().Str("message", evt.Message.GetTextMessage().GetText()).Msg("Message received")
+		if evt.Message.GetConversation() != "" {
+			log.Info().Str("message", evt.Message.GetConversation()).Msg("Message received")
+		} else if evt.Message.GetExtendedTextMessage() != nil {
+			log.Info().Str("message", evt.Message.GetExtendedTextMessage().GetText()).Msg("Message received")
+		}
 
 		var s3Config struct {
 			Enabled       string `db:"s3_enabled"`
