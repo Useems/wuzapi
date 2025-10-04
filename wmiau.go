@@ -623,6 +623,8 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			return
 		}
 
+		log.Info().Str("message", evt.Message.GetTextMessage().GetText()).Msg("Message received")
+
 		var s3Config struct {
 			Enabled       string `db:"s3_enabled"`
 			MediaDelivery string `db:"media_delivery"`
